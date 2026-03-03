@@ -9,10 +9,12 @@ import numpy as np
 from sklearn import preprocessing
 from sklearn.cluster import KMeans
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import silhouette_score
 
 # Visualization
 import matplotlib.pyplot as plt
 import seaborn as sns
+import io
 #endregion
 
 
@@ -20,6 +22,9 @@ class PairedSwitching(QCAlgorithm):
     
     def initialize(self):
         """Initialize the algorithm with settings and universe."""
+        # Initialize log buffer
+        self._log_content = "Algorithm Initialized\n"
+        
         self.set_start_date(2025, 3, 15)
         self.set_cash(100000)
         
@@ -39,7 +44,7 @@ class PairedSwitching(QCAlgorithm):
         
         # Add SPY as baseline to universe
         self._current_universe.add("SPY")
-        
+
         # Use coarse/fine universe selection for S&P 500 stocks
         self.universe_settings.resolution = Resolution.DAILY
         self.add_universe(self._coarse_filter, self._fine_filter)
@@ -50,39 +55,56 @@ class PairedSwitching(QCAlgorithm):
             self.time_rules.after_market_open("SPY", 1),
             self._monthly_rebalance
         )
+
+    def debug(self, message):
+        """Override debug to accumulate logs."""
+        # Append to internal log buffer
+        #self._log_content += f"{self.time}: {message}\n"
+        #super().debug(message)
+        # super().debug(message)
     
     def _coarse_filter(self, coarse):
         """Filter stocks by price and volume."""
-        selected = []
-        for cf in coarse:
-            if cf.price > 1 and cf.volume > 100000:
-                selected.append(cf.symbol)
-                self._current_universe.add(cf.symbol)
+        # Select stocks with fundamental data and price > 1
+        filtered = [x for x in coarse if x.has_fundamental_data and x.price > 1]
         
-        self.debug(f"Coarse filter: {len(selected)} symbols selected")
+        # Sort by Dollar Volume to get the most liquid stocks
+        # We take top 1000 to ensure we have enough candidates for each sector in fine selection
+        sorted_by_dollar_vol = sorted(filtered, key=lambda x: x.dollar_volume, reverse=True)
+        selected = [x.symbol for x in sorted_by_dollar_vol[:1000]]
+        
+        # self.debug(f"Coarse filter: {len(selected)} symbols selected")
         return selected
     
     def _fine_filter(self, fine):
-        """Fine filter for stocks with valid market cap."""
-        # Filter for stocks with market cap data
-        sp500_stocks = [f for f in fine if f.market_cap > 0]
+        """Select top 10 stocks by market cap in each sector."""
+        # Group stocks by Morningstar Sector Code
+        sector_dict = {}
+        for f in fine:
+            if f.market_cap == 0: continue
+            sector = f.asset_classification.morningstar_sector_code
+            if sector not in sector_dict:
+                sector_dict[sector] = []
+            sector_dict[sector].append(f)
         
-        selected = [f.symbol for f in sp500_stocks]
-        for symbol in selected:
-            self._current_universe.add(symbol)
+        selected = []
+        # Select top 10 by market cap for each sector
+        for sector in sector_dict:
+            sorted_sector = sorted(sector_dict[sector], key=lambda x: x.market_cap, reverse=True)
+            selected.extend([x.symbol for x in sorted_sector[:10]])
         
-        self.debug(f"Fine filter: {len(selected)} stocks with market cap data")
+        # self.debug(f"Fine filter: {len(selected)} stocks selected across {len(sector_dict)} sectors")
         return selected
     
     def on_securities_changed(self, changes):
         """Track universe additions and removals."""
         if len(changes.added_securities) > 0:
-            self.debug(f"Adding {len(changes.added_securities)} securities to universe")
+            # self.debug(f"Adding {len(changes.added_securities)} securities to universe")
             for security in changes.added_securities:
                 self._current_universe.add(str(security.symbol))
         
         if len(changes.removed_securities) > 0:
-            self.debug(f"Removing {len(changes.removed_securities)} securities from universe")
+            # self.debug(f"Removing {len(changes.removed_securities)} securities from universe")
             for security in changes.removed_securities:
                 self._current_universe.discard(str(security.symbol))
     
@@ -96,15 +118,16 @@ class PairedSwitching(QCAlgorithm):
         
         # First month after warmup
         if self._months == 7:
-            self.debug("=" * 100)
-            self.debug("WARMUP COMPLETE - Starting cluster and regression analysis")
-            self.debug("=" * 100)
+            # self.debug("=" * 100)
+            # self.debug("WARMUP COMPLETE - Starting cluster and regression analysis")
+            # self.debug("=" * 100)
+            pass
         
         # Perform analysis after warmup
         if self._months >= 7:
-            self.debug(f"\n{'=' * 100}")
-            self.debug(f"MONTHLY RETRAINING - Month {self._months}")
-            self.debug(f"{'=' * 100}")
+            # self.debug(f"\n{'=' * 100}")
+            # self.debug(f"MONTHLY RETRAINING - Month {self._months}")
+            # self.debug(f"{'=' * 100}")
             
             # Collect stock metrics
             metrics_data = self._collect_stock_metrics()
@@ -118,24 +141,30 @@ class PairedSwitching(QCAlgorithm):
                 
                 # Perform regression analysis
                 self._perform_regression_analysis(metrics_data)
+                
+                # Analyze correlations BETWEEN groups (The Grid)
+                self._analyze_group_correlations()
+                
+                # Save visual and data outputs
+                self._save_monthly_outputs(metrics_data)
     
     def _collect_stock_metrics(self):
         """Collect price, momentum, and other metrics for all stocks in universe."""
         symbols = list(self._current_universe)
         
         if not symbols:
-            self.debug("No symbols in universe")
+            # self.debug("No symbols in universe")
             return None
         
-        self.debug(f"Universe contains {len(symbols)} symbols")
-        self.debug(f"Collecting metrics for {len(symbols)} stocks...")
+        # self.debug(f"Universe contains {len(symbols)} symbols")
+        # self.debug(f"Collecting metrics for {len(symbols)} stocks...")
         
         try:
             # Fetch historical data (1 year for momentum calculation)
             history = self.history(symbols, 252, Resolution.DAILY)
             
             if history.empty:
-                self.debug("No historical data retrieved")
+                # self.debug("No historical data retrieved")
                 return None
             
             # Extract available symbols
@@ -144,7 +173,7 @@ class PairedSwitching(QCAlgorithm):
             else:
                 available_symbols = []
             
-            self.debug(f"Retrieved data for {len(available_symbols)} symbols from history")
+            # self.debug(f"Retrieved data for {len(available_symbols)} symbols from history")
             
             metrics = {}
             
@@ -185,7 +214,7 @@ class PairedSwitching(QCAlgorithm):
                 except (KeyError, Exception):
                     pass
             
-            self.debug(f"Collected metrics for {len(metrics)} stocks")
+            # self.debug(f"Collected metrics for {len(metrics)} stocks")
             
             if len(metrics) > 0:
                 return pd.DataFrame(metrics).T
@@ -193,13 +222,13 @@ class PairedSwitching(QCAlgorithm):
                 return None
             
         except Exception as e:
-            self.debug(f"Error collecting metrics: {str(e)}")
+            # self.debug(f"Error collecting metrics: {str(e)}")
             return None
     
     def _perform_clustering(self, metrics_df):
         """Perform K-Means clustering on stock metrics."""
         if metrics_df is None or len(metrics_df) < 2:
-            self.debug(f"Insufficient data for clustering (need 2+, have {len(metrics_df) if metrics_df is not None else 0})")
+            # self.debug(f"Insufficient data for clustering (need 2+, have {len(metrics_df) if metrics_df is not None else 0})")
             return
         
         try:
@@ -215,7 +244,7 @@ class PairedSwitching(QCAlgorithm):
             if n_clusters > n_stocks:
                 n_clusters = max(2, n_stocks // 2)
             
-            self.debug(f"Performing K-Means clustering with {n_clusters} clusters on {n_stocks} stocks...")
+            # self.debug(f"Performing K-Means clustering with {n_clusters} clusters on {n_stocks} stocks...")
             
             # K-Means clustering
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -229,28 +258,38 @@ class PairedSwitching(QCAlgorithm):
             for symbol, label in zip(metrics_df.index, labels):
                 self._correlation_groups[label].append(symbol)
             
-            self.debug(f"Clustering complete: {n_clusters} groups created")
+            # Update runtime statistic in the banner
+            self.set_runtime_statistic("Clusters", n_clusters)
+            
+            # Calculate and plot Silhouette Score (measure of separation/cohesion)
+            if len(set(labels)) > 1:
+                sil_score = silhouette_score(metrics_scaled, labels)
+                self.plot("Clustering Performance", "Silhouette Score", sil_score)
+            self.plot("Clustering Performance", "Cluster Count", n_clusters)
+            
+            # self.debug(f"Clustering complete: {n_clusters} groups created")
             
         except Exception as e:
-            self.debug(f"Error in clustering: {str(e)}")
+            # self.debug(f"Error in clustering: {str(e)}")
+            pass
     
     def _generate_group_report(self, metrics_df):
         """Generate and print group report."""
         if not self._correlation_groups:
-            self.debug("No groups to report")
+            # self.debug("No groups to report")
             return
         
-        self.debug("\n" + "=" * 100)
-        self.debug("GROUP REPORT")
-        self.debug("=" * 100)
+        # self.debug("\n" + "=" * 100)
+        # self.debug("GROUP REPORT")
+        # self.debug("=" * 100)
         
         for group_id, symbols in sorted(self._correlation_groups.items()):
             if not symbols:
                 continue
             
-            self.debug(f"\n{'─' * 100}")
-            self.debug(f"GROUP {group_id} - {len(symbols)} MEMBERS")
-            self.debug(f"{'─' * 100}")
+            # self.debug(f"\n{'─' * 100}")
+            # self.debug(f"GROUP {group_id} - {len(symbols)} MEMBERS")
+            # self.debug(f"{'─' * 100}")
             
             # Group statistics
             group_metrics = metrics_df.loc[symbols]
@@ -261,46 +300,58 @@ class PairedSwitching(QCAlgorithm):
             avg_volatility = group_metrics['volatility'].mean()
             avg_volume = group_metrics['volume'].mean()
             
-            self.debug(f"GROUP METRICS:")
-            self.debug(f"  Average Price: ${avg_price:.2f}")
-            self.debug(f"  Average Price Change: {avg_price_change*100:.2f}%")
-            self.debug(f"  Average Momentum (21d): {avg_momentum*100:.2f}%")
-            self.debug(f"  Average Volatility: {avg_volatility*100:.2f}%")
-            self.debug(f"  Average Volume: {avg_volume:,.0f}")
+            # Plot group momentum to the Results tab
+            self.plot("Group Momentum", f"Group {group_id}", avg_momentum)
+            
+            # Plot group size
+            self.plot("Group Sizes", f"Group {group_id}", len(symbols))
+            
+            # self.debug(f"GROUP METRICS:")
+            # self.debug(f"  Average Price: ${avg_price:.2f}")
+            # self.debug(f"  Average Price Change: {avg_price_change*100:.2f}%")
+            # self.debug(f"  Average Momentum (21d): {avg_momentum*100:.2f}%")
+            # self.debug(f"  Average Volatility: {avg_volatility*100:.2f}%")
+            # self.debug(f"  Average Volume: {avg_volume:,.0f}")
             
             # Characterize the group
             if avg_momentum > 0.05:
-                self.debug(f"  Characteristic: STRONG UPTREND")
+                # self.debug(f"  Characteristic: STRONG UPTREND")
+                pass
             elif avg_momentum < -0.05:
-                self.debug(f"  Characteristic: STRONG DOWNTREND")
+                # self.debug(f"  Characteristic: STRONG DOWNTREND")
+                pass
             else:
-                self.debug(f"  Characteristic: NEUTRAL/SIDEWAYS")
+                # self.debug(f"  Characteristic: NEUTRAL/SIDEWAYS")
+                pass
             
             if avg_volatility > 0.025:
-                self.debug(f"  Volatility Profile: HIGH")
+                # self.debug(f"  Volatility Profile: HIGH")
+                pass
             elif avg_volatility > 0.015:
-                self.debug(f"  Volatility Profile: MODERATE")
+                # self.debug(f"  Volatility Profile: MODERATE")
+                pass
             else:
-                self.debug(f"  Volatility Profile: LOW")
+                # self.debug(f"  Volatility Profile: LOW")
+                pass
             
             # Member list
-            self.debug(f"\nMEMBERS ({len(symbols)} stocks):")
+            # self.debug(f"\nMEMBERS ({len(symbols)} stocks):")
             sorted_symbols = sorted(symbols)
             
             for i in range(0, len(sorted_symbols), 5):
                 row = sorted_symbols[i:i+5]
-                self.debug(f"  {', '.join(row)}")
+                # self.debug(f"  {', '.join(row)}")
         
-        self.debug("\n" + "=" * 100)
+        # self.debug("\n" + "=" * 100)
     
     def _perform_regression_analysis(self, metrics_df):
         """Perform regression analysis between groups and metrics."""
         if not self._correlation_groups:
-            self.debug("No groups for regression analysis")
+            # self.debug("No groups for regression analysis")
             return
         
         try:
-            self.debug(f"\nPerforming regression analysis between groups...")
+            # self.debug(f"\nPerforming regression analysis between groups...")
             
             # Create group assignment series
             group_assignments = {}
@@ -329,6 +380,9 @@ class PairedSwitching(QCAlgorithm):
                     
                     results[metric_col] = r_squared
                     
+                    # Plot the R-squared value to visualize correlation strength over time
+                    self.plot("Cluster Feature Importance (R2)", metric_col, r_squared)
+                    
                 except Exception as e:
                     results[metric_col] = 0.0
             
@@ -336,35 +390,149 @@ class PairedSwitching(QCAlgorithm):
             self._generate_regression_report(results)
             
         except Exception as e:
-            self.debug(f"Error in regression analysis: {str(e)}")
+            # self.debug(f"Error in regression analysis: {str(e)}")
+            pass
     
     def _generate_regression_report(self, results):
         """Generate and print regression report."""
-        self.debug("\n" + "=" * 100)
-        self.debug("REGRESSION ANALYSIS REPORT - Group Metrics Correlation")
-        self.debug("=" * 100)
+        # self.debug("\n" + "=" * 100)
+        # self.debug("REGRESSION ANALYSIS REPORT - Group Metrics Correlation")
+        # self.debug("=" * 100)
         
-        self.debug(f"\nR-squared values indicate how well each metric correlates with group membership:")
-        self.debug(f"(Higher = stronger correlation between metric and group)\n")
+        # self.debug(f"\nR-squared values indicate how well each metric correlates with group membership:")
+        # self.debug(f"(Higher = stronger correlation between metric and group)\n")
         
         # Sort by R-squared descending
         sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
         
         for metric, r_squared in sorted_results:
             strength = "STRONG" if r_squared > 0.5 else "MODERATE" if r_squared > 0.25 else "WEAK"
-            self.debug(f"  {metric:<20} R² = {r_squared:.4f}  [{strength}]")
+            # self.debug(f"  {metric:<20} R² = {r_squared:.4f}  [{strength}]")
         
         # Summary
-        self.debug("\nINTERPRETATION:")
+        # self.debug("\nINTERPRETATION:")
         high_correlation = [m for m, r2 in results.items() if r2 > 0.5]
         
         if high_correlation:
-            self.debug(f"  Strong group distinction factors: {', '.join(high_correlation)}")
+            # self.debug(f"  Strong group distinction factors: {', '.join(high_correlation)}")
+            pass
         else:
-            self.debug(f"  Groups show weak metric-based distinction - may indicate alternative grouping factors")
+            # self.debug(f"  Groups show weak metric-based distinction - may indicate alternative grouping factors")
+            pass
         
-        self.debug("\n" + "=" * 100)
+        # self.debug("\n" + "=" * 100)
     
+    def _analyze_group_correlations(self):
+        """
+        Calculate and visualize correlations between groups based on daily returns.
+        Generates a Heatmap (Grid) saved to ObjectStore and plots summary stats.
+        """
+        if not self._correlation_groups:
+            return
+
+        # 1. Get historical data for all symbols in groups
+        all_symbols = []
+        for symbols in self._correlation_groups.values():
+            all_symbols.extend(symbols)
+        
+        # Get 60 days of data for correlation analysis
+        history = self.history(all_symbols, 60, Resolution.DAILY)
+        if history.empty:
+            return
+
+        # 2. Calculate Group Indices (Average Daily Returns of members)
+        group_returns = {}
+        
+        # Pivot history to get close prices: Index=Time, Columns=Symbol
+        closes = history['close'].unstack(level=0)
+        returns = closes.pct_change().dropna()
+
+        for group_id, symbols in self._correlation_groups.items():
+            # Filter for symbols present in this group and in the history
+            group_syms = [s for s in symbols if str(s) in returns.columns]
+            if not group_syms:
+                continue
+            
+            # Average return of the group for each day
+            # axis=1 means average across columns (stocks) for each row (day)
+            group_returns[f"Group {group_id}"] = returns[group_syms].mean(axis=1)
+
+        if not group_returns:
+            return
+
+        group_returns_df = pd.DataFrame(group_returns)
+        
+        # 3. Calculate Correlation Matrix
+        corr_matrix = group_returns_df.corr()
+        
+        # 4. Plot Summary Metrics to Results Tab
+        # Mask diagonal to find true min/max (ignore self-correlation of 1.0)
+        mask = np.ones(corr_matrix.shape, dtype=bool)
+        np.fill_diagonal(mask, 0)
+        
+        if len(corr_matrix) > 1:
+            self.plot("Inter-Group Correlations", "Avg Correlation", corr_matrix.values[mask].mean())
+            self.plot("Inter-Group Correlations", "Min Correlation", corr_matrix.values[mask].min())
+            self.plot("Inter-Group Correlations", "Max Correlation", corr_matrix.values[mask].max())
+
+        # 5. Save Heatmap (The "Grid") to Object Store
+        try:
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, fmt=".2f")
+            plt.title(f'Inter-Group Correlation Matrix (Month {self._months})')
+            
+            img_buf = io.BytesIO()
+            plt.savefig(img_buf, format='png')
+            self.object_store.save_bytes(f"group_corr_matrix_month_{self._months}.png", list(img_buf.getvalue()))
+            plt.close()
+        except Exception:
+            pass
+
+    def _save_monthly_outputs(self, metrics_df):
+        """Save CSV data and Matplotlib charts to ObjectStore."""
+        try:
+            # 1. Save Metrics to CSV
+            # This allows you to download the raw data later for local analysis
+            csv_key = f"metrics_month_{self._months}.csv"
+            self.object_store.save(csv_key, metrics_df.to_csv())
+            
+            # 2. Generate and Save Cluster Plot
+            # Create a scatter plot of Momentum vs Volatility colored by Cluster
+            plt.figure(figsize=(10, 6))
+            sns.scatterplot(data=metrics_df, x='volatility', y='momentum', 
+                            hue=self._get_labels_for_plot(metrics_df), palette='viridis')
+            plt.title(f'Clustering: Momentum vs Volatility (Month {self._months})')
+            plt.xlabel('Volatility')
+            plt.ylabel('Momentum')
+            
+            # Save plot to a bytes buffer, then to ObjectStore
+            img_buf = io.BytesIO()
+            plt.savefig(img_buf, format='png')
+            self.object_store.save_bytes(f"cluster_plot_month_{self._months}.png", list(img_buf.getvalue()))
+            plt.close()
+            
+        except Exception as e:
+            # self.debug(f"Error saving outputs: {str(e)}")
+            pass
+
+    def _get_labels_for_plot(self, df):
+        """Helper to reconstruct labels list for plotting."""
+        labels = []
+        # Create a mapping from symbol to group
+        symbol_to_group = {}
+        for group_id, symbols in self._correlation_groups.items():
+            for sym in symbols:
+                symbol_to_group[sym] = group_id
+        
+        for sym in df.index:
+            labels.append(symbol_to_group.get(sym, -1))
+        return labels
+
     def on_data(self, data):
         """Process incoming data (placeholder)."""
         pass
+
+    def on_end_of_algorithm(self):
+        """Save logs to Object Store at the end."""
+        self.object_store.save("algorithm_log.txt", self._log_content)
+        # self.debug("Log file saved to Object Store: algorithm_log.txt")
