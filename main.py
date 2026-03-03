@@ -513,7 +513,6 @@ class PairedSwitching(QCAlgorithm):
             group_series = {}
             
             # Add Baseline
-            if l]
             for group_name, symbols in self._correlation_groups.items():
                 # Filter for symbols present in this group and in the data
                 group_syms = [s for s in symbols if s in data_df.columns]
