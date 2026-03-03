@@ -44,8 +44,7 @@ class PairedSwitching(QCAlgorithm):
         self._months = 0
         
         # Add SPY as baseline to universe
-        self._current_universe.add(self.spy.Symbol)
-
+        self._current_universe.add(self.spy.symbol)
         # Use coarse/fine universe selection for S&P 500 stocks
         self.universe_settings.resolution = Resolution.DAILY
         self.add_universe(self._coarse_filter, self._fine_filter)
@@ -73,21 +72,28 @@ class PairedSwitching(QCAlgorithm):
         return selected
     
     def _fine_filter(self, fine):
-        """Select top 10 stocks by market cap in each sector."""
+        """Select top 100 stocks by market cap in each sector."""
         # Group stocks by Morningstar Sector Code
         sector_dict = {}
+        sector_mcap = {}
+        
         for f in fine:
             if f.market_cap == 0: continue
             sector = f.asset_classification.morningstar_sector_code
             if sector not in sector_dict:
                 sector_dict[sector] = []
+                sector_mcap[sector] = 0
             sector_dict[sector].append(f)
+            sector_mcap[sector] += f.market_cap
+        
+        # Select Top 5 Sectors by total market cap
+        top_5_sectors = sorted(sector_mcap, key=lambda x: sector_mcap[x], reverse=True)[:5]
         
         selected = []
-        # Select top 10 by market cap for each sector
-        for sector in sector_dict:
+        # Select top 100 by market cap for each of the top 5 sectors
+        for sector in top_5_sectors:
             sorted_sector = sorted(sector_dict[sector], key=lambda x: x.market_cap, reverse=True)
-            selected.extend([x.symbol for x in sorted_sector[:10]])
+            selected.extend([x.symbol for x in sorted_sector[:100]])
         
         # self.debug(f"Fine filter: {len(selected)} stocks selected across {len(sector_dict)} sectors")
         return selected
@@ -139,7 +145,8 @@ class PairedSwitching(QCAlgorithm):
     
     def _collect_stock_metrics(self):
         """Collect price, momentum, and other metrics for all stocks in universe."""
-        symbols = list(self._current_universe)
+        # Ensure we only pass valid Symbol objects to history
+        symbols = [s for s in self._current_universe if isinstance(s, Symbol)]
         
         if not symbols:
             # self.debug("No symbols in universe")
@@ -151,55 +158,91 @@ class PairedSwitching(QCAlgorithm):
         try:
             # Fetch historical data (1 year for momentum calculation)
             history = self.history(symbols, 252, Resolution.DAILY)
+
             
             if history.empty:
                 # self.debug("No historical data retrieved")
                 return None
             
-            # Extract available symbols
-            if hasattr(history.index, 'levels'):
-                available_symbols = history.index.get_level_values(0).unique()
-            else:
-                available_symbols = []
-            
-            # self.debug(f"Retrieved data for {len(available_symbols)} symbols from history")
-            
             metrics = {}
             
-            for symbol in symbols:
-                try:
-                    # Check if symbol exists in history
-                    if symbol not in available_symbols:
-                        continue
+            # Create mapping for Ticker -> Symbol to handle potential string keys in history
+            ticker_to_symbol = {str(s.value): s for s in symbols}
+            
+            # Iterate through the data we actually have using groupby
+            # This avoids checking 'if symbol in available_symbols' and handling KeyErrors manually
+            # level=0 is the Symbol index
+            for identifier, sym_history in history.groupby(level=0):
+                
+                # Resolve the identifier to a Symbol object
+                symbol_obj = None
+                if isinstance(identifier, Symbol):
+                    symbol_obj = identifier
+                elif isinstance(identifier, str):
+                    symbol_obj = ticker_to_symbol.get(identifier)
+                
+                # If we can't map it to a known symbol, skip
+                if symbol_obj is None:
+                    continue
+                
+                # Need sufficient data
+                if len(sym_history) < 252 * 0.5:
+                    continue
+                
+                # Extract data safely
+                if 'close' not in sym_history.columns:
+                    continue
                     
-                    sym_history = history.loc[symbol]
-                    
-                    # Need sufficient data
-                    if len(sym_history) < 252 * 0.5:
-                        continue
-                    
-                    close_prices = sym_history['close'].values
-                    volumes = sym_history['volume'].values
-                    
-                    # Calculate metrics
-                    current_price = close_prices[-1]
-                    price_change = (close_prices[-1] - close_prices[0]) / close_prices[0] if close_prices[0] != 0 else 0
-                    momentum = (close_prices[-1] - close_prices[-21]) / close_prices[-21] if len(close_prices) > 20 and close_prices[-21] != 0 else 0
-                    volatility = np.std(np.diff(close_prices) / close_prices[:-1])
+                close_prices = np.array(sym_history['close'].values, dtype=np.float64)
+                
+                # Handle volume if present
+                if 'volume' in sym_history.columns:
+                    volumes = np.array(sym_history['volume'].values, dtype=np.float64)
                     avg_volume = np.mean(volumes)
-                    direction = 1 if price_change > 0 else -1
+                else:
+                    avg_volume = 0
+                
+                # Calculate metrics
+                current_price = close_prices[-1]
+                
+                # Price Change
+                start_price = close_prices[0]
+                price_change = (current_price - start_price) / start_price if start_price != 0 else 0
+                
+                # Momentum (21 days)
+                if len(close_prices) > 21:
+                    prev_price = close_prices[-21]
+                    momentum = (current_price - prev_price) / prev_price if prev_price != 0 else 0
+                else:
+                    momentum = 0
+                
+                # Volatility
+                if len(close_prices) > 1:
+                    prices_t = close_prices[1:]
+                    prices_t_minus_1 = close_prices[:-1]
                     
-                    metrics[symbol] = {
-                        'price': current_price,
-                        'price_change': price_change,
-                        'momentum': momentum,
-                        'volatility': volatility,
-                        'volume': avg_volume,
-                        'direction': direction
-                    }
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        returns = (prices_t - prices_t_minus_1) / prices_t_minus_1
                     
-                except (KeyError, Exception):
-                    pass
+                    returns = returns[np.isfinite(returns)]
+                    
+                    if len(returns) > 0:
+                        volatility = np.std(returns)
+                    else:
+                        volatility = 0
+                else:
+                    volatility = 0
+                
+                direction = 1 if price_change > 0 else -1
+                
+                metrics[symbol_obj] = {
+                    'price': current_price,
+                    'price_change': price_change,
+                    'momentum': momentum,
+                    'volatility': volatility,
+                    'volume': avg_volume,
+                    'direction': direction
+                }
             
             # self.debug(f"Collected metrics for {len(metrics)} stocks")
             
@@ -213,46 +256,55 @@ class PairedSwitching(QCAlgorithm):
             return None
     
     def _perform_clustering(self, metrics_df):
-        """Perform K-Means clustering on stock metrics."""
+        """Classify stocks into 6 Market Regimes based on Momentum and Volatility."""
         if metrics_df is None or len(metrics_df) < 2:
             # self.debug(f"Insufficient data for clustering (need 2+, have {len(metrics_df) if metrics_df is not None else 0})")
             return
         
         try:
-            # Normalize the metrics
-            scaler = preprocessing.StandardScaler()
-            metrics_scaled = scaler.fit_transform(metrics_df)
+            # Define 6 Fixed Regimes
+            # 0: Calm Bull      (Mom > 2%, Vol < 1.5%)
+            # 1: Volatile Bull  (Mom > 2%, Vol > 1.5%)
+            # 2: Calm Bear      (Mom < -2%, Vol < 1.5%)
+            # 3: Volatile Bear  (Mom < -2%, Vol > 1.5%)
+            # 4: Calm Sideways  (Mom between -2% and 2%, Vol < 1.5%)
+            # 5: Volatile Sideways (Mom between -2% and 2%, Vol > 1.5%)
             
-            # Determine optimal number of clusters
-            n_stocks = len(metrics_df)
-            n_clusters = max(2, min(15, max(2, n_stocks // 30)))  # At least 2 clusters
+            regime_names = [
+                "Calm Bull", "Volatile Bull",
+                "Calm Bear", "Volatile Bear",
+                "Calm Sideways", "Volatile Sideways"
+            ]
+            groups = {name: [] for name in regime_names}
             
-            # Prevent more clusters than stocks
-            if n_clusters > n_stocks:
-                n_clusters = max(2, n_stocks // 2)
+            for symbol, row in metrics_df.iterrows():
+                mom = row['momentum']
+                vol = row['volatility']
+                
+                # Determine Trend
+                if mom > 0.02: trend = "Bull"
+                elif mom < -0.02: trend = "Bear"
+                else: trend = "Sideways"
+                
+                # Determine Volatility (1.5% daily threshold)
+                if vol > 0.015: vol_type = "Volatile"
+                else: vol_type = "Calm"
+                
+                # Assign Group ID
+                if trend == "Bull" and vol_type == "Calm": grp = "Calm Bull"
+                elif trend == "Bull" and vol_type == "Volatile": grp = "Volatile Bull"
+                elif trend == "Bear" and vol_type == "Calm": grp = "Calm Bear"
+                elif trend == "Bear" and vol_type == "Volatile": grp = "Volatile Bear"
+                elif trend == "Sideways" and vol_type == "Calm": grp = "Calm Sideways"
+                elif trend == "Sideways" and vol_type == "Volatile": grp = "Volatile Sideways"
+                
+                groups[grp].append(symbol)
             
-            # self.debug(f"Performing K-Means clustering with {n_clusters} clusters on {n_stocks} stocks...")
-            
-            # K-Means clustering
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            labels = kmeans.fit_predict(metrics_scaled)
-            
-            # Store results
-            self._correlation_groups = {}
-            for i in range(n_clusters):
-                self._correlation_groups[i] = []
-            
-            for symbol, label in zip(metrics_df.index, labels):
-                self._correlation_groups[label].append(symbol)
+            self._correlation_groups = groups
             
             # Update runtime statistic in the banner
-            self.set_runtime_statistic("Clusters", n_clusters)
-            
-            # Calculate and plot Silhouette Score (measure of separation/cohesion)
-            if len(set(labels)) > 1:
-                sil_score = silhouette_score(metrics_scaled, labels)
-                self.plot("Clustering Performance", "Silhouette Score", sil_score)
-            self.plot("Clustering Performance", "Cluster Count", n_clusters)
+            self.set_runtime_statistic("Clusters", 6)
+            self.plot("Clustering Performance", "Cluster Count", 6)
             
             # self.debug(f"Clustering complete: {n_clusters} groups created")
             
@@ -272,7 +324,7 @@ class PairedSwitching(QCAlgorithm):
         
         self._group_labels = {}
         
-        for group_id, symbols in sorted(self._correlation_groups.items()):
+        for group_name, symbols in sorted(self._correlation_groups.items()):
             if not symbols:
                 continue
             
@@ -290,10 +342,10 @@ class PairedSwitching(QCAlgorithm):
             avg_volume = group_metrics['volume'].mean()
             
             # Plot group momentum to the Results tab
-            self.plot("Group Momentum", f"Group {group_id}", avg_momentum)
+            self.plot("Group Momentum", f"Group {group_name}", avg_momentum)
             
             # Plot group size
-            self.plot("Group Sizes", f"Group {group_id}", len(symbols))
+            self.plot("Group Sizes", f"Group {group_name}", len(symbols))
             
             # self.debug(f"GROUP METRICS:")
             # self.debug(f"  Average Price: ${avg_price:.2f}")
@@ -303,24 +355,8 @@ class PairedSwitching(QCAlgorithm):
             # self.debug(f"  Average Volume: {avg_volume:,.0f}")
             
             # Characterize the group
-            # Assign label based on momentum
-            if avg_momentum > 0.02:
-                label = "Bullish"
-            elif avg_momentum < -0.02:
-                label = "Bearish"
-            else:
-                label = "Sideways"
-            self._group_labels[group_id] = label
-            
-            if avg_volatility > 0.025:
-                # self.debug(f"  Volatility Profile: HIGH")
-                pass
-            elif avg_volatility > 0.015:
-                # self.debug(f"  Volatility Profile: MODERATE")
-                pass
-            else:
-                # self.debug(f"  Volatility Profile: LOW")
-                pass
+            # Use fixed label
+            self._group_labels[group_name] = group_name
             
             # Member list
             # self.debug(f"\nMEMBERS ({len(symbols)} stocks):")
@@ -343,9 +379,14 @@ class PairedSwitching(QCAlgorithm):
             
             # Create group assignment series
             group_assignments = {}
-            for group_id, symbols in self._correlation_groups.items():
+            
+            # Map names to integers for regression
+            unique_groups = sorted(self._correlation_groups.keys())
+            name_to_id = {name: i for i, name in enumerate(unique_groups)}
+            
+            for group_name, symbols in self._correlation_groups.items():
                 for symbol in symbols:
-                    group_assignments[symbol] = group_id
+                    group_assignments[symbol] = name_to_id[group_name]
             
             group_series = pd.Series(group_assignments)
             
@@ -369,7 +410,7 @@ class PairedSwitching(QCAlgorithm):
                     results[metric_col] = r_squared
                     
                     # Plot the R-squared value to visualize correlation strength over time
-                    self.plot("Cluster Feature Importance (R2)", metric_col, r_squared)
+                    self.plot("Cluster Feature Importance (R2)", metric_col, float(r_squared))
                     
                 except Exception as e:
                     results[metric_col] = 0.0
@@ -423,10 +464,13 @@ class PairedSwitching(QCAlgorithm):
         for symbols in self._correlation_groups.values():
             all_symbols.extend(symbols)
         
-        # Add Baseline (SPY) to history request
-        if self.spy.Symbol not in all_symbols:
-            all_symbols.append(self.spy.Symbol)
+        # Ensure we only have valid Symbol objects
+        all_symbols = [s for s in all_symbols if isinstance(s, Symbol)]
         
+        # Add Baseline (SPY) to history request
+        if self.spy.symbol not in all_symbols:
+            all_symbols.append(self.spy.symbol)
+            
         # Get data: 60 days for correlation + 21 days buffer for momentum calc
         history = self.history(all_symbols, 81, Resolution.DAILY)
         if history.empty:
@@ -437,11 +481,31 @@ class PairedSwitching(QCAlgorithm):
         closes = history['close'].unstack(level=0)
         volumes = history['volume'].unstack(level=0)
         
+        # Normalize columns to Symbol objects to ensure lookups work
+        ticker_to_symbol = {}
+        for s in all_symbols:
+            ticker_to_symbol[str(s.value)] = s
+            ticker_to_symbol[str(s)] = s
+            
+        def normalize_columns(df):
+            if df.empty: return df
+            new_cols = {}
+            for c in df.columns:
+                if isinstance(c, str):
+                    sym = ticker_to_symbol.get(c)
+                    if sym:
+                        new_cols[c] = sym
+            return df.rename(columns=new_cols)
+
+        closes = normalize_columns(closes)
+        volumes = normalize_columns(volumes)
+        
         # Define metrics to analyze
         metrics_to_analyze = {
             "Price Returns": closes.pct_change().dropna(),
             "Volume Changes": volumes.pct_change().dropna(),
-            "Momentum Trends": closes.pct_change(21).dropna()
+            "Momentum Trends": closes.pct_change(21).dropna(),
+            "Price Levels": closes
         }
         
         for metric_name, data_df in metrics_to_analyze.items():
@@ -449,16 +513,14 @@ class PairedSwitching(QCAlgorithm):
             group_series = {}
             
             # Add Baseline
-            if self.spy.Symbol in data_df.columns:
-                group_series["Baseline"] = data_df[self.spy.Symbol]
-            
-            for group_id, symbols in self._correlation_groups.items():
+            if l]
+            for group_name, symbols in self._correlation_groups.items():
                 # Filter for symbols present in this group and in the data
                 group_syms = [s for s in symbols if s in data_df.columns]
                 if not group_syms:
                     continue
                 # Average the metric across stocks in the group for each day
-                group_series[f"Group {group_id}"] = data_df[group_syms].mean(axis=1)
+                group_series[group_name] = data_df[group_syms].mean(axis=1)
 
             if not group_series:
                 continue
@@ -469,21 +531,10 @@ class PairedSwitching(QCAlgorithm):
             corr_matrix = group_df.corr()
             
             # 4. Print Matrix to Console (The "Grid") with Labels
-            display_matrix = corr_matrix.copy()
-            rename_map = {}
-            for col in display_matrix.columns:
-                if col.startswith("Group"):
-                    try:
-                        g_id = int(col.split(" ")[1])
-                        lbl = self._group_labels.get(g_id, "")
-                        rename_map[col] = f"G{g_id} ({lbl})"
-                    except:
-                        pass
-            display_matrix.rename(columns=rename_map, index=rename_map, inplace=True)
+            #self.debug(f"\nINTER-GROUP {metric_name.upper()} CORRELATION (Month {self._months}):\n" + corr_matrix.to_string(float_format=lambda x: "{:.2f}".format(x)))
             
-            #self.debug(f"\nINTER-GROUP {metric_name.upper()} CORRELATION (Month {self._months}):\n" + display_matrix.to_string(float_format=lambda x: "{:.2f}".format(x)))
-            
-            # 5. Plotting (Only for Price Returns to avoid chart clutter)
+            # 5. Plotting
+            # A. Inter-Group Structure (Price Returns Only)
             if metric_name == "Price Returns":
                 # Mask diagonal to find true min/max
                 mask = np.ones(corr_matrix.shape, dtype=bool)
@@ -491,29 +542,49 @@ class PairedSwitching(QCAlgorithm):
                 
                 if len(corr_matrix) > 1:
                     # Calculate Inter-Group stats (excluding Baseline for "Inter-Group" chart consistency)
-                    group_cols = [c for c in corr_matrix.columns if c.startswith("Group")]
-                    if len(group_cols) > 1:
-                        group_corr = corr_matrix.loc[group_cols, group_cols]
+                    group_mask = [c in self._correlation_groups for c in corr_matrix.columns]
+                    if sum(group_mask) > 1:
+                        # Use integer indexing (iloc) with boolean mask to avoid QuantConnect PandasMapper issues
+                        group_corr = corr_matrix.iloc[group_mask, group_mask]
+                        
                         mask_g = np.ones(group_corr.shape, dtype=bool)
                         np.fill_diagonal(mask_g, 0)
                         
-                        self.plot("Inter-Group Correlations", "Avg Correlation", group_corr.values[mask_g].mean())
-                        self.plot("Inter-Group Correlations", "Min Correlation", group_corr.values[mask_g].min())
+                        self.plot("Inter-Group Correlations", "Avg Correlation", float(group_corr.values[mask_g].mean()))
+                        self.plot("Inter-Group Correlations", "Min Correlation", float(group_corr.values[mask_g].min()))
                 
-                # Plot individual group divergence and Baseline Correlation
-                for col in corr_matrix.columns:
-                    if not col.startswith("Group"): continue
+                # Plot individual group divergence
+                for i, col in enumerate(corr_matrix.columns):
+                    if col not in self._correlation_groups: continue
                     
                     # Divergence vs Rest (other groups)
-                    other_groups = [c for c in corr_matrix.columns if c.startswith("Group") and c != col]
-                    if other_groups:
-                        avg_val = corr_matrix.loc[col, other_groups].mean()
-                        self.plot("Group Divergence", f"{col} vs Rest", avg_val)
-                    
+                    other_mask = [(c in self._correlation_groups and c != col) for c in corr_matrix.columns]
+                    if any(other_mask):
+                        # Use .values to bypass QuantConnect Pandas wrapper
+                        avg_val = corr_matrix.values[i, other_mask].mean()
+                        if pd.notna(avg_val):
+                            self.plot("Group Divergence", f"{col} vs Rest", float(avg_val))
+
+            # B. Baseline Correlations (For Price Returns, Momentum, and Price Levels)
+            chart_name = None
+            if metric_name == "Price Returns":
+                chart_name = "Baseline Correlations"
+            elif metric_name == "Momentum Trends":
+                chart_name = "Baseline Momentum Correlations"
+            elif metric_name == "Price Levels":
+                chart_name = "Baseline Price Correlations"
+            
+            if chart_name:
+                for i, col in enumerate(corr_matrix.columns):
+                    if col not in self._correlation_groups: continue
+
                     # Correlation vs Baseline
-                    if "Baseline" in corr_matrix.columns:
-                        base_corr = corr_matrix.loc[col, "Baseline"]
-                        self.plot("Baseline Correlations", f"{col} vs SPY", base_corr)
+                    baseline_indices = [idx for idx, c in enumerate(corr_matrix.columns) if str(c) == "Baseline"]
+                    if baseline_indices:
+                        # Use .values to bypass QuantConnect Pandas wrapper
+                        val = corr_matrix.values[i, baseline_indices[0]]
+                        if pd.notna(val):
+                            self.plot(chart_name, f"{col} vs SPY", float(val))
 
     def _save_monthly_outputs(self, metrics_df):
         """Save CSV data and Matplotlib charts to ObjectStore."""
@@ -552,7 +623,7 @@ class PairedSwitching(QCAlgorithm):
                 symbol_to_group[sym] = group_id
         
         for sym in df.index:
-            labels.append(symbol_to_group.get(sym, -1))
+            labels.append(symbol_to_group.get(sym, "Unknown"))
         return labels
 
     def on_data(self, data):
