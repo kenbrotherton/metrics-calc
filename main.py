@@ -40,10 +40,11 @@ class PairedSwitching(QCAlgorithm):
         self._market_cap_data = {}
         self._current_universe = set()
         self._correlation_groups = {}
+        self._group_labels = {}
         self._months = 0
         
         # Add SPY as baseline to universe
-        self._current_universe.add("SPY")
+        self._current_universe.add(self.spy.Symbol)
 
         # Use coarse/fine universe selection for S&P 500 stocks
         self.universe_settings.resolution = Resolution.DAILY
@@ -56,12 +57,7 @@ class PairedSwitching(QCAlgorithm):
             self._monthly_rebalance
         )
 
-    def debug(self, message):
-        """Override debug to accumulate logs."""
-        # Append to internal log buffer
-        #self._log_content += f"{self.time}: {message}\n"
-        #super().debug(message)
-        # super().debug(message)
+
     
     def _coarse_filter(self, coarse):
         """Filter stocks by price and volume."""
@@ -101,12 +97,12 @@ class PairedSwitching(QCAlgorithm):
         if len(changes.added_securities) > 0:
             # self.debug(f"Adding {len(changes.added_securities)} securities to universe")
             for security in changes.added_securities:
-                self._current_universe.add(str(security.symbol))
+                self._current_universe.add(security.symbol)
         
         if len(changes.removed_securities) > 0:
             # self.debug(f"Removing {len(changes.removed_securities)} securities from universe")
             for security in changes.removed_securities:
-                self._current_universe.discard(str(security.symbol))
+                self._current_universe.discard(security.symbol)
     
     def _monthly_rebalance(self):
         """Monthly event handler to retrain clustering model."""
@@ -115,13 +111,6 @@ class PairedSwitching(QCAlgorithm):
         # Skip during warmup
         if self.is_warming_up:
             return
-        
-        # First month after warmup
-        if self._months == 7:
-            # self.debug("=" * 100)
-            # self.debug("WARMUP COMPLETE - Starting cluster and regression analysis")
-            # self.debug("=" * 100)
-            pass
         
         # Perform analysis after warmup
         if self._months >= 7:
@@ -179,13 +168,11 @@ class PairedSwitching(QCAlgorithm):
             
             for symbol in symbols:
                 try:
-                    sym_str = str(symbol)
-                    
                     # Check if symbol exists in history
-                    if sym_str not in [str(s) for s in available_symbols]:
+                    if symbol not in available_symbols:
                         continue
                     
-                    sym_history = history.loc[sym_str]
+                    sym_history = history.loc[symbol]
                     
                     # Need sufficient data
                     if len(sym_history) < 252 * 0.5:
@@ -202,7 +189,7 @@ class PairedSwitching(QCAlgorithm):
                     avg_volume = np.mean(volumes)
                     direction = 1 if price_change > 0 else -1
                     
-                    metrics[sym_str] = {
+                    metrics[symbol] = {
                         'price': current_price,
                         'price_change': price_change,
                         'momentum': momentum,
@@ -283,6 +270,8 @@ class PairedSwitching(QCAlgorithm):
         # self.debug("GROUP REPORT")
         # self.debug("=" * 100)
         
+        self._group_labels = {}
+        
         for group_id, symbols in sorted(self._correlation_groups.items()):
             if not symbols:
                 continue
@@ -314,15 +303,14 @@ class PairedSwitching(QCAlgorithm):
             # self.debug(f"  Average Volume: {avg_volume:,.0f}")
             
             # Characterize the group
-            if avg_momentum > 0.05:
-                # self.debug(f"  Characteristic: STRONG UPTREND")
-                pass
-            elif avg_momentum < -0.05:
-                # self.debug(f"  Characteristic: STRONG DOWNTREND")
-                pass
+            # Assign label based on momentum
+            if avg_momentum > 0.02:
+                label = "Bullish"
+            elif avg_momentum < -0.02:
+                label = "Bearish"
             else:
-                # self.debug(f"  Characteristic: NEUTRAL/SIDEWAYS")
-                pass
+                label = "Sideways"
+            self._group_labels[group_id] = label
             
             if avg_volatility > 0.025:
                 # self.debug(f"  Volatility Profile: HIGH")
@@ -435,58 +423,97 @@ class PairedSwitching(QCAlgorithm):
         for symbols in self._correlation_groups.values():
             all_symbols.extend(symbols)
         
-        # Get 60 days of data for correlation analysis
-        history = self.history(all_symbols, 60, Resolution.DAILY)
+        # Add Baseline (SPY) to history request
+        if self.spy.Symbol not in all_symbols:
+            all_symbols.append(self.spy.Symbol)
+        
+        # Get data: 60 days for correlation + 21 days buffer for momentum calc
+        history = self.history(all_symbols, 81, Resolution.DAILY)
         if history.empty:
             return
 
-        # 2. Calculate Group Indices (Average Daily Returns of members)
-        group_returns = {}
-        
-        # Pivot history to get close prices: Index=Time, Columns=Symbol
+        # Prepare DataFrames
+        # unstack(level=0) moves Symbol from index to columns
         closes = history['close'].unstack(level=0)
-        returns = closes.pct_change().dropna()
+        volumes = history['volume'].unstack(level=0)
+        
+        # Define metrics to analyze
+        metrics_to_analyze = {
+            "Price Returns": closes.pct_change().dropna(),
+            "Volume Changes": volumes.pct_change().dropna(),
+            "Momentum Trends": closes.pct_change(21).dropna()
+        }
+        
+        for metric_name, data_df in metrics_to_analyze.items():
+            # 2. Calculate Group Indices (Average of members)
+            group_series = {}
+            
+            # Add Baseline
+            if self.spy.Symbol in data_df.columns:
+                group_series["Baseline"] = data_df[self.spy.Symbol]
+            
+            for group_id, symbols in self._correlation_groups.items():
+                # Filter for symbols present in this group and in the data
+                group_syms = [s for s in symbols if s in data_df.columns]
+                if not group_syms:
+                    continue
+                # Average the metric across stocks in the group for each day
+                group_series[f"Group {group_id}"] = data_df[group_syms].mean(axis=1)
 
-        for group_id, symbols in self._correlation_groups.items():
-            # Filter for symbols present in this group and in the history
-            group_syms = [s for s in symbols if str(s) in returns.columns]
-            if not group_syms:
+            if not group_series:
                 continue
+
+            group_df = pd.DataFrame(group_series)
             
-            # Average return of the group for each day
-            # axis=1 means average across columns (stocks) for each row (day)
-            group_returns[f"Group {group_id}"] = returns[group_syms].mean(axis=1)
-
-        if not group_returns:
-            return
-
-        group_returns_df = pd.DataFrame(group_returns)
-        
-        # 3. Calculate Correlation Matrix
-        corr_matrix = group_returns_df.corr()
-        
-        # 4. Plot Summary Metrics to Results Tab
-        # Mask diagonal to find true min/max (ignore self-correlation of 1.0)
-        mask = np.ones(corr_matrix.shape, dtype=bool)
-        np.fill_diagonal(mask, 0)
-        
-        if len(corr_matrix) > 1:
-            self.plot("Inter-Group Correlations", "Avg Correlation", corr_matrix.values[mask].mean())
-            self.plot("Inter-Group Correlations", "Min Correlation", corr_matrix.values[mask].min())
-            self.plot("Inter-Group Correlations", "Max Correlation", corr_matrix.values[mask].max())
-
-        # 5. Save Heatmap (The "Grid") to Object Store
-        try:
-            plt.figure(figsize=(10, 8))
-            sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, fmt=".2f")
-            plt.title(f'Inter-Group Correlation Matrix (Month {self._months})')
+            # 3. Calculate Correlation Matrix
+            corr_matrix = group_df.corr()
             
-            img_buf = io.BytesIO()
-            plt.savefig(img_buf, format='png')
-            self.object_store.save_bytes(f"group_corr_matrix_month_{self._months}.png", list(img_buf.getvalue()))
-            plt.close()
-        except Exception:
-            pass
+            # 4. Print Matrix to Console (The "Grid") with Labels
+            display_matrix = corr_matrix.copy()
+            rename_map = {}
+            for col in display_matrix.columns:
+                if col.startswith("Group"):
+                    try:
+                        g_id = int(col.split(" ")[1])
+                        lbl = self._group_labels.get(g_id, "")
+                        rename_map[col] = f"G{g_id} ({lbl})"
+                    except:
+                        pass
+            display_matrix.rename(columns=rename_map, index=rename_map, inplace=True)
+            
+            #self.debug(f"\nINTER-GROUP {metric_name.upper()} CORRELATION (Month {self._months}):\n" + display_matrix.to_string(float_format=lambda x: "{:.2f}".format(x)))
+            
+            # 5. Plotting (Only for Price Returns to avoid chart clutter)
+            if metric_name == "Price Returns":
+                # Mask diagonal to find true min/max
+                mask = np.ones(corr_matrix.shape, dtype=bool)
+                np.fill_diagonal(mask, 0)
+                
+                if len(corr_matrix) > 1:
+                    # Calculate Inter-Group stats (excluding Baseline for "Inter-Group" chart consistency)
+                    group_cols = [c for c in corr_matrix.columns if c.startswith("Group")]
+                    if len(group_cols) > 1:
+                        group_corr = corr_matrix.loc[group_cols, group_cols]
+                        mask_g = np.ones(group_corr.shape, dtype=bool)
+                        np.fill_diagonal(mask_g, 0)
+                        
+                        self.plot("Inter-Group Correlations", "Avg Correlation", group_corr.values[mask_g].mean())
+                        self.plot("Inter-Group Correlations", "Min Correlation", group_corr.values[mask_g].min())
+                
+                # Plot individual group divergence and Baseline Correlation
+                for col in corr_matrix.columns:
+                    if not col.startswith("Group"): continue
+                    
+                    # Divergence vs Rest (other groups)
+                    other_groups = [c for c in corr_matrix.columns if c.startswith("Group") and c != col]
+                    if other_groups:
+                        avg_val = corr_matrix.loc[col, other_groups].mean()
+                        self.plot("Group Divergence", f"{col} vs Rest", avg_val)
+                    
+                    # Correlation vs Baseline
+                    if "Baseline" in corr_matrix.columns:
+                        base_corr = corr_matrix.loc[col, "Baseline"]
+                        self.plot("Baseline Correlations", f"{col} vs SPY", base_corr)
 
     def _save_monthly_outputs(self, metrics_df):
         """Save CSV data and Matplotlib charts to ObjectStore."""
