@@ -16,7 +16,12 @@ PairedSwitching/
 
 ## Local Data Setup
 
-Your local data is located at: **`C:\Users\kenbr\QC\data`**
+Your local data is located at: **`C:\Users\kenbr\QC\data`** (on Windows host)
+
+**Important:** When running notebooks in the LEAN Docker research environment:
+- The data is automatically mounted inside the container at `/Lean/Data`
+- The notebooks use this Docker path (`/Lean/Data`) internally
+- Your Windows data directory is transparently accessible through this mount
 
 The data structure follows QuantConnect's format:
 ```
@@ -105,8 +110,9 @@ To run the `main.py` algorithm with local data:
 ## Configuration Notes
 
 ### Data Path
-- The notebook is configured to use: `C:\Users\kenbr\QC\data`
-- If your data is elsewhere, update the `DATA_ROOT` variable in Cell 1
+- The notebook is configured to use: `/Lean/Data` (Docker container path)
+- This automatically maps to `C:\Users\kenbr\QC\data` on your Windows machine
+- If running outside Docker, update the `DATA_ROOT` variable in Cell 1
 
 ### Universe Selection
 - The notebook uses a curated list of top 100 liquid stocks
