@@ -655,6 +655,548 @@ class ADXMetric(MetricCalculator):
         return adx
 
 
+# ============================================================================
+# EHLERS INDICATORS
+# Advanced indicators developed by John F. Ehlers for reduced lag and 
+# better cycle/trend identification
+# ============================================================================
+
+class EhlersSuperSmootherMetric(MetricCalculator):
+    """Ehlers SuperSmoother Filter - 2-pole Butterworth low-pass filter."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_supersmoother_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Ehlers SuperSmoother."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close']
+        n = len(prices)
+        
+        # Butterworth coefficients
+        a1 = np.exp(-np.sqrt(2) * np.pi / self.period)
+        b1 = 2 * a1 * np.cos(np.sqrt(2) * np.pi / self.period)
+        c2 = b1 + a1 * a1
+        c3 = -(a1 * a1 + b1 * a1)
+        c1 = 1 - c3 - c2
+        
+        # Initialize output array
+        ss = np.zeros(n)
+        ss[0] = prices.iloc[0]
+        
+        if n > 1:
+            ss[1] = (c1 * prices.iloc[1] + c2 * ss[0]) / (1 + c3)
+        
+        # Apply filter
+        for i in range(2, n):
+            ss[i] = c1 * prices.iloc[i] + c2 * ss[i-1] + c3 * ss[i-2]
+        
+        return pd.Series(ss, index=df.index)
+
+
+class EhlersMAMAMetric(MetricCalculator):
+    """Ehlers MAMA (Mesa Adaptive Moving Average) and FAMA (Following Adaptive MA)."""
+    
+    def __init__(self, fast_limit=0.5, slow_limit=0.05):
+        super().__init__('ehlers_mama_fama')
+        self.fast_limit = fast_limit
+        self.slow_limit = slow_limit
+    
+    def calculate(self, df):
+        """Calculate MAMA and FAMA."""
+        if 'close' not in df.columns:
+            return pd.DataFrame(index=df.index)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        mama = np.zeros(n)
+        fama = np.zeros(n)
+        
+        # High-pass filter the prices
+        hp = np.zeros(n)
+        hp[0] = prices[0]
+        
+        for i in range(1, n):
+            if i >= 2:
+                # 2-period high-pass filter
+                hp[i] = 0.5 * (1 - 0.015 * i) * (prices[i] - prices[i-2]) + 0.79 * hp[i-1]
+            else:
+                hp[i] = prices[i] - prices[i-1]
+        
+        # Hilbert transform approximation via phasing
+        phase = np.zeros(n)
+        for i in range(2, n):
+            if i >= 6:
+                # Compute phase
+                quad = (0.0962 * hp[i] + 0.5769 * hp[i-2] - 0.5769 * hp[i-4] - 0.0962 * hp[i-6])
+                real = (0.0962 * hp[i-1] + 0.5769 * hp[i-3] - 0.5769 * hp[i-5] - 0.0962 * hp[i-7] if i >= 7 else 0)
+                if real != 0:
+                    phase[i] = np.arctan(quad / real) if quad / real > 0 else np.arctan(quad / real) + np.pi
+                else:
+                    phase[i] = phase[i-1]
+        
+        # Compute Adaptive MA
+        dc_period = np.full(n, 20.0)  # Initialize dominant cycle
+        smooth = np.full(n, 0.0)
+        
+        for i in range(1, n):
+            if i >= 10:
+                dc_period[i] = 2 * np.pi / (0.075 * phase[i] + 0.54) if phase[i] != 0 else dc_period[i-1]
+            
+            alpha = 2.0 / (dc_period[i] + 1.0)
+            smooth[i] = 0.33 * prices[i] + 0.67 * smooth[i-1] if i > 0 else prices[i]
+            
+            # MAMA calculation
+            mama[i] = (self.fast_limit * smooth[i]) + (1 - self.fast_limit) * (mama[i-1] if i > 0 else smooth[i])
+            # FAMA calculation
+            fama[i] = (self.slow_limit * mama[i]) + (1 - self.slow_limit) * (fama[i-1] if i > 0 else mama[i])
+        
+        result = pd.DataFrame(index=df.index)
+        result['ehlers_mama'] = mama
+        result['ehlers_fama'] = fama
+        
+        return result
+
+
+class EhlersRoofingFilterMetric(MetricCalculator):
+    """Ehlers Roofing Filter - High-Pass + SuperSmoother combination."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_roofing_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Roofing Filter."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # High-pass filter component
+        hp = np.zeros(n)
+        for i in range(2, n):
+            hp[i] = 0.5 * (1.5 - 0.75 / self.period) * (prices[i] - prices[i-1]) + 0.79 * hp[i-1]
+        
+        # Apply SuperSmoother to high-pass output
+        a1 = np.exp(-np.sqrt(2) * np.pi / self.period)
+        b1 = 2 * a1 * np.cos(np.sqrt(2) * np.pi / self.period)
+        c2 = b1 + a1 * a1
+        c3 = -(a1 * a1 + b1 * a1)
+        c1 = 1 - c3 - c2
+        
+        roof = np.zeros(n)
+        roof[0] = hp[0]
+        if n > 1:
+            roof[1] = (c1 * hp[1] + c2 * roof[0]) / (1 + c3)
+        
+        for i in range(2, n):
+            roof[i] = c1 * hp[i] + c2 * roof[i-1] + c3 * roof[i-2]
+        
+        return pd.Series(roof, index=df.index)
+
+
+class EhlersGaussianFilterMetric(MetricCalculator):
+    """Ehlers Gaussian Filter - N-pole filter with bell-curve weighting."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_gaussian_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Gaussian Filter."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close']
+        
+        # Create Gaussian weights
+        weights = np.zeros(self.period)
+        for i in range(self.period):
+            weights[i] = np.exp(-((i - self.period/2) ** 2) / (2 * (self.period/4) ** 2))
+        
+        weights /= weights.sum()
+        
+        # Apply weighted convolution
+        result = prices.rolling(window=self.period).apply(
+            lambda x: np.dot(x.values, weights), raw=False
+        )
+        
+        return result
+
+
+class EhlersFisherTransformMetric(MetricCalculator):
+    """Ehlers Fisher Transform - Normalizes price to Gaussian distribution."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_fisher_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Fisher Transform."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close']
+        
+        # Normalize prices to -1 to 1 range
+        min_price = prices.rolling(window=self.period).min()
+        max_price = prices.rolling(window=self.period).max()
+        
+        normalized = 2 * (prices - min_price) / (max_price - min_price + 0.001) - 1
+        
+        # Apply Fisher Transform: 0.5 * ln((1+x)/(1-x))
+        # Use fillna to handle edge cases
+        normalized = normalized.clip(-0.999, 0.999)
+        fisher = 0.5 * np.log((1 + normalized) / (1 - normalized + 0.001))
+        
+        return fisher
+
+
+class EhlersLaguerreRSIMetric(MetricCalculator):
+    """Ehlers Laguerre RSI - Smoother RSI using Laguerre polynomials."""
+    
+    def __init__(self, period=14, alpha=0.5):
+        super().__init__(f'ehlers_laguerre_rsi_{period}d')
+        self.period = period
+        self.alpha = alpha
+    
+    def calculate(self, df):
+        """Calculate Laguerre RSI."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Apply Laguerre filter
+        L0 = np.zeros(n)
+        L1 = np.zeros(n)
+        L2 = np.zeros(n)
+        L3 = np.zeros(n)
+        
+        for i in range(n):
+            L0[i] = self.alpha * prices[i] + (1 - self.alpha) * (L0[i-1] if i > 0 else prices[i])
+            L1[i] = -(1 - self.alpha) * L0[i] + (L0[i-1] if i > 0 else L0[i]) + (1 - self.alpha) * (L1[i-1] if i > 0 else 0)
+            L2[i] = -(1 - self.alpha) * L1[i] + (L1[i-1] if i > 0 else L1[i]) + (1 - self.alpha) * (L2[i-1] if i > 0 else 0)
+            L3[i] = -(1 - self.alpha) * L2[i] + (L2[i-1] if i > 0 else L2[i]) + (1 - self.alpha) * (L3[i-1] if i > 0 else 0)
+        
+        # Compute RSI from Laguerre values
+        cu = np.zeros(n)
+        cd = np.zeros(n)
+        
+        for i in range(1, n):
+            diff = L3[i] - L3[i-1]
+            if diff > 0:
+                cu[i] = diff
+            else:
+                cd[i] = -diff
+        
+        cu_smooth = pd.Series(cu).rolling(window=self.period).mean().values
+        cd_smooth = pd.Series(cd).rolling(window=self.period).mean().values
+        
+        laguerre_rsi = np.zeros(n)
+        for i in range(n):
+            if cu_smooth[i] + cd_smooth[i] > 0:
+                laguerre_rsi[i] = cu_smooth[i] / (cu_smooth[i] + cd_smooth[i])
+            else:
+                laguerre_rsi[i] = 0
+        
+        return pd.Series(laguerre_rsi, index=df.index)
+
+
+class EhlersCyberCycleMetric(MetricCalculator):
+    """Ehlers Cyber Cycle - Isolates cyclic component of price action."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_cyber_cycle_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Cyber Cycle."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Smooth prices
+        smooth = np.zeros(n)
+        for i in range(n):
+            if i < 3:
+                smooth[i] = np.mean(prices[:i+1])
+            else:
+                smooth[i] = (prices[i] + 2 * prices[i-1] + 2 * prices[i-2] + prices[i-3]) / 6.0
+        
+        # Apply band-pass filter
+        cc = np.zeros(n)
+        for i in range(3, n):
+            # Cyber Cycle band-pass approximation
+            cc[i] = (smooth[i] - 2 * smooth[i-1] + smooth[i-2]) * 0.25 + cc[i-1] * 0.5
+        
+        return pd.Series(cc, index=df.index)
+
+
+class EhlersRVIMetric(MetricCalculator):
+    """Ehlers Relative Vigor Index - Measures trend conviction."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_rvi_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Relative Vigor Index."""
+        required_cols = ['open', 'high', 'low', 'close']
+        if not all(col in df.columns for col in required_cols):
+            return pd.Series(index=df.index, dtype=float)
+        
+        # Numerator: (Close - Open)
+        numerator = (df['close'] - df['open']).rolling(window=self.period).sum()
+        
+        # Denominator: (High - Low)
+        denominator = (df['high'] - df['low']).rolling(window=self.period).sum()
+        
+        # RVI = Numerator / Denominator
+        rvi = numerator / (denominator + 0.001)
+        
+        return rvi
+
+
+class EhlersReflexMetric(MetricCalculator):
+    """Ehlers Reflex - Identifies cycle peaks and valleys."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_reflex_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Reflex indicator."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Calculate momentum with zero lag
+        reflex = np.zeros(n)
+        for i in range(2, n):
+            # Zero-lag momentum
+            if i >= self.period:
+                reflex[i] = prices[i] - prices[i - self.period]
+            else:
+                reflex[i] = prices[i] - prices[0]
+        
+        return pd.Series(reflex, index=df.index)
+
+
+class EhlersTrendflexMetric(MetricCalculator):
+    """Ehlers Trendflex - Identifies trend onset/exhaustion."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_trendflex_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Trendflex indicator."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Compute detrended price
+        trendflex = np.zeros(n)
+        for i in range(n):
+            if i >= self.period:
+                # Slope of linear regression
+                x = np.arange(self.period)
+                y = prices[i-self.period+1:i+1]
+                z = np.polyfit(x, y, 1)
+                trendflex[i] = prices[i] - (z[0] * (self.period - 1) + z[1])
+            else:
+                trendflex[i] = prices[i] - np.mean(prices[:i+1])
+        
+        return pd.Series(trendflex, index=df.index)
+
+
+class EhlersHilbertSineMetric(MetricCalculator):
+    """Ehlers Hilbert Sine Wave - Lead and Sine lines for cycle identification."""
+    
+    def __init__(self, period=10):
+        super().__init__('ehlers_hilbert_sine')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Hilbert Sine Wave (Lead Sine and Sine)."""
+        if 'close' not in df.columns:
+            return pd.DataFrame(index=df.index)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # High-pass filter
+        hp = np.zeros(n)
+        for i in range(2, n):
+            hp[i] = 0.962 * hp[i-1] + (prices[i] - prices[i-1]) * 0.5
+        
+        # Hilbert Transform approximation
+        lead_sine = np.zeros(n)
+        sine = np.zeros(n)
+        
+        for i in range(3, n):
+            if i >= 6:
+                # In-phase and Quadrature components
+                inphase = 0.0962 * hp[i] + 0.5769 * hp[i-2] - 0.5769 * hp[i-4] - 0.0962 * hp[i-6]
+                quad = 0.0962 * hp[i-1] + 0.5769 * hp[i-3] - 0.5769 * hp[i-5] - 0.0962 * hp[i-7] if i >= 7 else 0
+                
+                # Normalize
+                magnitude = np.sqrt(inphase**2 + quad**2 + 0.001)
+                inphase /= magnitude
+                quad /= magnitude
+                
+                lead_sine[i] = inphase
+                sine[i] = quad
+        
+        result = pd.DataFrame(index=df.index)
+        result['ehlers_hilbert_lead_sine'] = lead_sine
+        result['ehlers_hilbert_sine'] = sine
+        
+        return result
+
+
+class EhlersDecyclerMetric(MetricCalculator):
+    """Ehlers Decycler - High-pass filter that removes cycles."""
+    
+    def __init__(self, period=20):
+        super().__init__(f'ehlers_decycler_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Decycler."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # High-pass filter (removes cycles)
+        decycler = np.zeros(n)
+        for i in range(2, n):
+            # 2-pole high-pass filter
+            if i >= 2:
+                decycler[i] = 0.5 * (1.5 - 0.75 / self.period) * (prices[i] - prices[i-1]) + 0.79 * decycler[i-1]
+        
+        return pd.Series(decycler, index=df.index)
+
+
+class EhlersContinuationIndexMetric(MetricCalculator):
+    """Ehlers Continuation Index - Binary signals for trend onset/exhaustion."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_continuation_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Continuation Index."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Simple trend strength indicator
+        ci = np.zeros(n)
+        for i in range(1, n):
+            # Compare current momentum to average
+            if i >= self.period:
+                recent_momentum = prices[i] - prices[i - self.period]
+                avg_momentum = np.mean([prices[j] - prices[j - 1] for j in range(i - self.period + 1, i + 1)])
+                ci[i] = 1 if recent_momentum > avg_momentum else -1
+            else:
+                ci[i] = 0
+        
+        return pd.Series(ci, index=df.index)
+
+
+class EhlersVossPredictiveMetric(MetricCalculator):
+    """Ehlers Voss Predictive Filter - Leads price action by predicted bars."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_voss_predictive_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Voss Predictive Filter."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Trend-following with predictive component
+        voss = np.zeros(n)
+        
+        for i in range(1, n):
+            if i >= self.period:
+                # Linear regression slope (predictive component)
+                x = np.arange(self.period)
+                y = prices[i - self.period + 1:i + 1]
+                z = np.polyfit(x, y, 1)
+                
+                # Current price plus slope projection
+                voss[i] = prices[i] + z[0]  # Add slope for ahead prediction
+            else:
+                voss[i] = prices[i]
+        
+        return pd.Series(voss, index=df.index)
+
+
+class EhlersInstantaneousTrendlineMetric(MetricCalculator):
+    """Ehlers Instantaneous Trendline - Follows trend, flat during cycles."""
+    
+    def __init__(self, period=10):
+        super().__init__(f'ehlers_inst_trendline_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """Calculate Instantaneous Trendline."""
+        if 'close' not in df.columns:
+            return pd.Series(index=df.index, dtype=float)
+        
+        prices = df['close'].values
+        n = len(prices)
+        
+        # Compute instantaneous trendline
+        trendline = np.zeros(n)
+        
+        for i in range(n):
+            if i == 0:
+                trendline[i] = prices[i]
+            elif i < self.period:
+                trendline[i] = np.mean(prices[:i+1])
+            else:
+                # Mode detection: if oscillating, use midpoint; if trending, use median
+                window = prices[i - self.period + 1:i + 1]
+                midpoint = (np.max(window) + np.min(window)) / 2.0
+                
+                # Detect if trending or cycling
+                swings = sum(1 for j in range(1, len(window)) if 
+                           (window[j] > window[j-1] and (j > 1 and window[j-1] < window[j-2])) or
+                           (window[j] < window[j-1] and (j > 1 and window[j-1] > window[j-2])))
+                
+                # If many swings, it's cycling - use midpoint; otherwise follow
+                if swings >= self.period / 3:
+                    trendline[i] = midpoint
+                else:
+                    trendline[i] = 0.5 * prices[i] + 0.5 * trendline[i-1]
+        
+        return pd.Series(trendline, index=df.index)
+
+
 class MetricsEngine:
     """
     Orchestrates calculation of multiple metrics for a symbol's price data.
@@ -742,6 +1284,29 @@ class MetricsEngine:
             # Directional indicators
             self.register_metric(DMIMetric(14))
             self.register_metric(ADXMetric(14))
+            
+            # Ehlers Core Smoothing & Trend Filters
+            self.register_metric(EhlersSuperSmootherMetric(10))
+            self.register_metric(EhlersMAMAMetric())
+            self.register_metric(EhlersRoofingFilterMetric(10))
+            self.register_metric(EhlersGaussianFilterMetric(10))
+            
+            # Ehlers Oscillators & Momentum
+            self.register_metric(EhlersFisherTransformMetric(10))
+            self.register_metric(EhlersLaguerreRSIMetric(14))
+            self.register_metric(EhlersCyberCycleMetric(10))
+            self.register_metric(EhlersRVIMetric(10))
+            self.register_metric(EhlersReflexMetric(10))
+            self.register_metric(EhlersTrendflexMetric(10))
+            
+            # Ehlers Cycle & Regime Identification
+            self.register_metric(EhlersHilbertSineMetric(10))
+            self.register_metric(EhlersDecyclerMetric(20))
+            self.register_metric(EhlersContinuationIndexMetric(10))
+            
+            # Ehlers Forecasting & Predictive
+            self.register_metric(EhlersVossPredictiveMetric(10))
+            self.register_metric(EhlersInstantaneousTrendlineMetric(10))
         
         return self
     
