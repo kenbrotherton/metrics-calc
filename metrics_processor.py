@@ -59,7 +59,21 @@ class MetricsProcessor:
                 
                 with zf.open(csv_name) as f:
                     df = pd.read_csv(f)
-                    
+
+                    # LEAN local daily files are commonly headerless:
+                    # time,open,high,low,close,volume[,openinterest]
+                    if 'close' not in [str(c).lower() for c in df.columns]:
+                        f.seek(0)
+                        raw_df = pd.read_csv(f, header=None)
+                        if raw_df.shape[1] >= 6:
+                            column_names = ['time', 'open', 'high', 'low', 'close', 'volume']
+                            if raw_df.shape[1] >= 7:
+                                column_names.append('openinterest')
+                            raw_df.columns = column_names[:raw_df.shape[1]]
+                            df = raw_df
+                        else:
+                            return None
+
                     # Parse date column
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
@@ -69,7 +83,7 @@ class MetricsProcessor:
                         df['date'] = pd.to_datetime(df.iloc[:, 0])
                     
                     df.set_index('date', inplace=True)
-                    df.columns = [c.lower() for c in df.columns]
+                    df.columns = [str(c).lower() for c in df.columns]
                     
                     # Filter by date range
                     if start_date:
