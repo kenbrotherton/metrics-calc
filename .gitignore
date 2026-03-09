@@ -7,6 +7,13 @@ local_config.json
 processed_metrics/
 __pycache__/
 *.pyc
+.QuantConnect/
+.venv/
+.ipynb_checkpoints/
+
+
 
 # Local data directories (do not publish to GitHub)
 data_old/
+processed_data/
+
