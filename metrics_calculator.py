@@ -556,6 +556,105 @@ class WilliamsRMetric(MetricCalculator):
         return williams_r
 
 
+class DMIMetric(MetricCalculator):
+    """Directional Movement Index (DMI) - includes +DI and -DI."""
+    
+    def __init__(self, period=14):
+        super().__init__(f'dmi_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """
+        Calculate Directional Movement Index (+DI and -DI).
+        
+        +DI measures upward price movement strength
+        -DI measures downward price movement strength
+        """
+        required_cols = ['high', 'low', 'close']
+        if not all(col in df.columns for col in required_cols):
+            return pd.DataFrame(index=df.index)
+        
+        # Calculate directional movements
+        high_diff = df['high'].diff()
+        low_diff = -df['low'].diff()
+        
+        # Positive and negative directional movements
+        plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+        minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+        
+        # Calculate True Range (same as ATR calculation)
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        
+        # Smooth using Wilder's smoothing (exponential moving average)
+        atr = tr.ewm(alpha=1/self.period, adjust=False).mean()
+        plus_dm_smooth = pd.Series(plus_dm, index=df.index).ewm(alpha=1/self.period, adjust=False).mean()
+        minus_dm_smooth = pd.Series(minus_dm, index=df.index).ewm(alpha=1/self.period, adjust=False).mean()
+        
+        # Calculate +DI and -DI
+        plus_di = 100 * (plus_dm_smooth / atr)
+        minus_di = 100 * (minus_dm_smooth / atr)
+        
+        result = pd.DataFrame(index=df.index)
+        result[f'{self.name}_plus'] = plus_di
+        result[f'{self.name}_minus'] = minus_di
+        
+        return result
+
+
+class ADXMetric(MetricCalculator):
+    """Average Directional Index (ADX) - measures trend strength."""
+    
+    def __init__(self, period=14):
+        super().__init__(f'adx_{period}d')
+        self.period = period
+    
+    def calculate(self, df):
+        """
+        Calculate Average Directional Index (ADX).
+        
+        ADX measures the strength of a trend (regardless of direction):
+        - ADX > 25: Strong trend
+        - ADX < 20: Weak trend or ranging market
+        """
+        required_cols = ['high', 'low', 'close']
+        if not all(col in df.columns for col in required_cols):
+            return pd.Series(index=df.index, dtype=float)
+        
+        # Calculate directional movements
+        high_diff = df['high'].diff()
+        low_diff = -df['low'].diff()
+        
+        # Positive and negative directional movements
+        plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+        minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+        
+        # Calculate True Range
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        
+        # Smooth using Wilder's smoothing
+        atr = tr.ewm(alpha=1/self.period, adjust=False).mean()
+        plus_dm_smooth = pd.Series(plus_dm, index=df.index).ewm(alpha=1/self.period, adjust=False).mean()
+        minus_dm_smooth = pd.Series(minus_dm, index=df.index).ewm(alpha=1/self.period, adjust=False).mean()
+        
+        # Calculate +DI and -DI
+        plus_di = 100 * (plus_dm_smooth / atr)
+        minus_di = 100 * (minus_dm_smooth / atr)
+        
+        # Calculate DX (Directional Index)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        
+        # Calculate ADX (smoothed DX)
+        adx = dx.ewm(alpha=1/self.period, adjust=False).mean()
+        
+        return adx
+
+
 class MetricsEngine:
     """
     Orchestrates calculation of multiple metrics for a symbol's price data.
@@ -639,6 +738,10 @@ class MetricsEngine:
             # Additional oscillators
             self.register_metric(CCIMetric(20))
             self.register_metric(WilliamsRMetric(14))
+            
+            # Directional indicators
+            self.register_metric(DMIMetric(14))
+            self.register_metric(ADXMetric(14))
         
         return self
     
