@@ -938,6 +938,15 @@ class PairedSwitching(QCAlgorithm):
             for i in range(len(group_names)):
                 for j in range(i + 1, len(group_names)):
                     group_a, group_b = group_names[i], group_names[j]
+
+                    # Ensure both groups exist in the correlation matrix (both index and columns) before accessing
+                    if (
+                        group_a not in inter_group_corr.index
+                        or group_a not in inter_group_corr.columns
+                        or group_b not in inter_group_corr.index
+                        or group_b not in inter_group_corr.columns
+                    ):
+                        continue
                     corr_value = float(inter_group_corr.at[group_a, group_b])
                     
                     if corr_value >= self._group_corr_threshold:

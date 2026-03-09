@@ -707,17 +707,29 @@ class AutocorrelationPeriodogramMetric(MetricCalculator):
         x = price.values
 
         for i in range(self.window, len(x)):
-            segment = pd.Series(x[i - self.window:i])
-            corrs = []
-            lags = range(self.min_period, min(self.max_period, self.window - 1) + 1)
-            for lag in lags:
-                corrs.append(segment.autocorr(lag=lag))
+            try:
+                segment = pd.Series(x[i - self.window:i])
+                corrs = []
+                lags = range(self.min_period, min(self.max_period, self.window - 1) + 1)
+                for lag in lags:
+                    try:
+                        autocorr_val = segment.autocorr(lag=lag)
+                        if autocorr_val is not None and np.isfinite(autocorr_val):
+                            corrs.append(float(autocorr_val))
+                        else:
+                            corrs.append(np.nan)
+                    except:
+                        corrs.append(np.nan)
 
-            if len(corrs) > 0 and np.any(np.isfinite(corrs)):
-                corrs_arr = np.array(corrs, dtype=float)
-                idx = int(np.nanargmax(np.abs(corrs_arr)))
-                dom_cycle[i] = list(lags)[idx]
-                strength[i] = corrs_arr[idx]
+                if len(corrs) > 0:
+                    corrs_arr = np.array(corrs, dtype=float)
+                    if np.any(np.isfinite(corrs_arr)):
+                        idx = int(np.nanargmax(np.abs(corrs_arr)))
+                        dom_cycle[i] = list(lags)[idx]
+                        strength[i] = corrs_arr[idx]
+            except:
+                # Silently skip any problematic segments
+                continue
 
         result = pd.DataFrame(index=df.index)
         result['dominant_cycle_period'] = dom_cycle
@@ -902,7 +914,7 @@ class MetricsEngine:
         # Ehlers cycle & regime
         self.register_metric(HilbertSineWaveMetric())
         self.register_metric(HilbertTransformDiscriminatorMetric())
-        self.register_metric(AutocorrelationPeriodogramMetric(10, 48, 96))
+        #self.register_metric(AutocorrelationPeriodogramMetric(10, 48, 96))  # Disabled due to numerical issues
         self.register_metric(EhlersDecyclerMetric(30))
         self.register_metric(ContinuationIndexMetric(20, 0.0))
 

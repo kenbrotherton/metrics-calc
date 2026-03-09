@@ -53,6 +53,49 @@ class MetricsProcessor:
         print(f"[OK] Found {len(symbols)} available symbols")
         return symbols
     
+    def discover_date_range(self, symbols_sample=20):
+        """Scan local data files to discover the actual date range available."""
+        min_date = None
+        max_date = None
+        
+        symbols = self.get_available_symbols(limit=symbols_sample)
+        
+        for symbol in symbols:
+            df = self.load_symbol_data(symbol, start_date=None, end_date=None)
+            if df is not None and len(df) > 0:
+                symbol_min = df.index.min()
+                symbol_max = df.index.max()
+                
+                if min_date is None or symbol_min < min_date:
+                    min_date = symbol_min
+                if max_date is None or symbol_max > max_date:
+                    max_date = symbol_max
+        
+        return min_date, max_date
+    
+    def get_latest_run_dir(self):
+        """Get the latest run directory, if any."""
+        run_dirs = sorted(self.output_dir.glob("run_*"))
+        return run_dirs[-1] if run_dirs else None
+    
+    def get_existing_metrics(self, symbol, run_dir=None):
+        """Load existing metrics for a symbol from previous run."""
+        if run_dir is None:
+            run_dir = self.get_latest_run_dir()
+        
+        if run_dir is None:
+            return None
+        
+        metrics_file = run_dir / f"{symbol.lower()}_metrics.csv"
+        if not metrics_file.exists():
+            return None
+        
+        try:
+            df = pd.read_csv(metrics_file, index_col=0, parse_dates=True)
+            return df
+        except Exception:
+            return None
+    
     def load_symbol_data(self, symbol, start_date, end_date):
         """Load historical price data for a single symbol."""
         zip_path = self.equity_daily / f"{symbol.lower()}.zip"
@@ -105,23 +148,53 @@ class MetricsProcessor:
         except Exception as e:
             return None
     
-    def collect_metrics(self, symbols, start_date, end_date, min_days=60):
+    def collect_metrics(self, symbols, start_date, end_date, min_days=60, run_dir=None, incremental=True):
         """
         Calculate rolling time-series metrics for all symbols.
+        
+        With incremental=True, only calculates metrics for new dates not already processed.
         
         Returns a dictionary mapping symbol -> DataFrame with date-indexed metrics.
         """
         metrics_data = {}
         loaded_count = 0
+        skipped_count = 0
         
         print(f"\nProcessing {len(symbols)} symbols with rolling metrics...")
+        if incremental:
+            print(f"[OK] Incremental mode: Will skip already-calculated metrics")
         
         for i, symbol in enumerate(symbols):
             if (i + 1) % 50 == 0:
                 print(f"  Progress: {i + 1}/{len(symbols)}")
             
-            df = self.load_symbol_data(symbol, start_date, end_date)
-            if df is None or len(df) < min_days * 0.5:
+            # Check for existing metrics
+            existing_metrics = None
+            if incremental:
+                existing_metrics = self.get_existing_metrics(symbol, run_dir)
+            
+            # Determine what date range needs processing
+            process_start_date = start_date
+            if existing_metrics is not None and len(existing_metrics) > 0:
+                existing_max_date = existing_metrics.index.max()
+                
+                # If existing metrics cover the full requested range, skip
+                if existing_max_date >= end_date:
+                    metrics_data[symbol] = existing_metrics
+                    skipped_count += 1
+                    continue
+                
+                # Only process dates after existing metrics
+                process_start_date = existing_max_date + timedelta(days=1)
+                print(f"  [Incremental] {symbol}: Existing metrics up to {existing_max_date.date()}, processing from {process_start_date.date()}")
+            
+            # Load and process data
+            df = self.load_symbol_data(symbol, process_start_date, end_date)
+            if df is None or len(df) < 1:
+                # No new data, use existing if available
+                if existing_metrics is not None:
+                    metrics_data[symbol] = existing_metrics
+                    skipped_count += 1
                 continue
             
             if 'close' not in df.columns:
@@ -129,17 +202,44 @@ class MetricsProcessor:
             
             try:
                 # Calculate all rolling metrics using the metrics engine
-                metrics_df = self.metrics_engine.calculate_all(df)
-                
-                if metrics_df is not None and len(metrics_df) > 0:
-                    metrics_data[symbol] = metrics_df
-                    loaded_count += 1
+                # Need full history for rolling windows, so reload from beginning
+                if existing_metrics is not None:
+                    # Need to reload full data for proper rolling calculations
+                    df_full = self.load_symbol_data(symbol, start_date, end_date)
+                    if df_full is not None and len(df_full) >= min_days * 0.5:
+                        metrics_df = self.metrics_engine.calculate_all(df_full)
+                        
+                        if metrics_df is not None and len(metrics_df) > 0:
+                            # Only keep new metrics that weren't in existing data
+                            new_metrics = metrics_df[metrics_df.index > existing_max_date]
+                            if len(new_metrics) > 0:
+                                # Merge with existing
+                                metrics_data[symbol] = pd.concat([existing_metrics, new_metrics])
+                                loaded_count += 1
+                            else:
+                                metrics_data[symbol] = existing_metrics
+                                skipped_count += 1
+                else:
+                    # No existing metrics, process normally
+                    if len(df) < min_days * 0.5:
+                        continue
+                    
+                    metrics_df = self.metrics_engine.calculate_all(df)
+                    
+                    if metrics_df is not None and len(metrics_df) > 0:
+                        metrics_data[symbol] = metrics_df
+                        loaded_count += 1
                     
             except Exception as e:
                 print(f"[!] Error processing {symbol}: {e}")
+                # Keep existing metrics if available
+                if existing_metrics is not None:
+                    metrics_data[symbol] = existing_metrics
+                    skipped_count += 1
                 continue
         
         print(f"\n[OK] Collected rolling metrics for {loaded_count} stocks")
+        print(f"[OK] Skipped {skipped_count} stocks (already up-to-date)")
         
         return metrics_data if len(metrics_data) > 0 else None
     
@@ -290,14 +390,34 @@ def main():
         # Get available symbols
         symbols = processor.get_available_symbols(limit=args.symbols_limit)
         
-        # Set date range
-        end_date = datetime.strptime(args.end_date, "%Y-%m-%d") if args.end_date else datetime.now()
-        start_date = datetime.strptime(args.start_date, "%Y-%m-%d") if args.start_date else (end_date - timedelta(days=365*3))
+        # Discover actual date range from local data files
+        print(f"\n[OK] Discovering date range from local data files...")
+        discovered_min, discovered_max = processor.discover_date_range(symbols_sample=min(20, len(symbols)))
+        
+        if discovered_min is None or discovered_max is None:
+            print("[X] Could not discover date range from data files")
+            sys.exit(1)
+        
+        print(f"[OK] Data available from {discovered_min.date()} to {discovered_max.date()}")
+        
+        # Set date range - use discovered max, default to 10 years back
+        end_date = datetime.strptime(args.end_date, "%Y-%m-%d") if args.end_date else discovered_max
+        start_date = datetime.strptime(args.start_date, "%Y-%m-%d") if args.start_date else (discovered_max - timedelta(days=365*10))
+        
+        # Ensure start date doesn't go before available data
+        if start_date < discovered_min:
+            start_date = discovered_min
+            print(f"[OK] Adjusted start date to earliest available: {start_date.date()}")
         
         print(f"\n[OK] Processing date range: {start_date.date()} to {end_date.date()}")
         
-        # Collect rolling metrics
-        metrics_data = processor.collect_metrics(symbols, start_date, end_date)
+        # Get latest run directory for incremental processing
+        latest_run = processor.get_latest_run_dir()
+        if latest_run:
+            print(f"[OK] Found existing run: {latest_run.name} (will process incrementally)")
+        
+        # Collect rolling metrics (incremental mode)
+        metrics_data = processor.collect_metrics(symbols, start_date, end_date, run_dir=latest_run, incremental=True)
         
         if metrics_data is not None:
             # Save to files
