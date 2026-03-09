@@ -4,15 +4,19 @@ config.json
 local_config.json
 backup.tar
 main.py
+.env
+.gitignore
+.venv
+.QuantConnect
+.ipynb_checkpoints
+
+
 
 
 # Local generated outputs
 processed_metrics/
 __pycache__/
 *.pyc
-.QuantConnect/
-.venv/
-.ipynb_checkpoints/
 
 
 
