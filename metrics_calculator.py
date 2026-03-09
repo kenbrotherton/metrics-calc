@@ -786,6 +786,50 @@ class InstantaneousTrendlineMetric(MetricCalculator):
         return pd.Series(itrend, index=df.index)
 
 
+class ClusterRegimeMetric(MetricCalculator):
+    """Per-date market regime assignment using momentum and volatility thresholds."""
+
+    def __init__(self, momentum_window=21, volatility_window=20, momentum_threshold=0.02, volatility_threshold=0.015):
+        super().__init__('cluster_regime')
+        self.momentum_window = momentum_window
+        self.volatility_window = volatility_window
+        self.momentum_threshold = momentum_threshold
+        self.volatility_threshold = volatility_threshold
+
+    def calculate(self, df):
+        if 'close' not in df.columns:
+            return pd.DataFrame(index=df.index)
+
+        close = pd.to_numeric(df['close'], errors='coerce')
+        momentum = close.pct_change(self.momentum_window)
+        volatility = close.pct_change().rolling(self.volatility_window).std()
+
+        trend = np.where(
+            momentum > self.momentum_threshold,
+            'Bull',
+            np.where(momentum < -self.momentum_threshold, 'Bear', 'Sideways')
+        )
+        volatility_type = np.where(volatility > self.volatility_threshold, 'Volatile', 'Calm')
+        trend_series = pd.Series(trend, index=df.index).astype(str)
+        volatility_series = pd.Series(volatility_type, index=df.index).astype(str)
+        labels = volatility_series.str.cat(trend_series, sep=' ')
+
+        code_map = {
+            'Calm Bull': 0,
+            'Volatile Bull': 1,
+            'Calm Bear': 2,
+            'Volatile Bear': 3,
+            'Calm Sideways': 4,
+            'Volatile Sideways': 5
+        }
+        codes = labels.map(code_map).astype('float')
+
+        result = pd.DataFrame(index=df.index)
+        result['cluster_regime'] = labels
+        result['cluster_regime_code'] = codes
+        return result
+
+
 class MetricsEngine:
     """Orchestrates calculation of multiple metrics."""
 
@@ -858,6 +902,9 @@ class MetricsEngine:
         self.register_metric(AutocorrelationPeriodogramMetric(10, 48, 96))
         self.register_metric(EhlersDecyclerMetric(30))
         self.register_metric(ContinuationIndexMetric(20, 0.0))
+
+        # Regime assignment metric
+        self.register_metric(ClusterRegimeMetric(21, 20, 0.02, 0.015))
 
         # Ehlers forecasting
         self.register_metric(VossPredictiveFilterMetric(3))
