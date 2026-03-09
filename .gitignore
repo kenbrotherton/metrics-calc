@@ -2,6 +2,9 @@
 alphaAdvantageAPIKey
 config.json
 local_config.json
+backup.tar
+main.py
+
 
 # Local generated outputs
 processed_metrics/
