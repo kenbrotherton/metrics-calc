@@ -1,0 +1,12 @@
+# Local secrets and machine-specific config
+alphaAdvantageAPIKey
+config.json
+local_config.json
+
+# Local generated outputs
+processed_metrics/
+__pycache__/
+*.pyc
+
+# Local data directories (do not publish to GitHub)
+data_old/
