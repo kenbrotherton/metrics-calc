@@ -152,7 +152,8 @@ class MetricsProcessor:
         """
         Calculate rolling time-series metrics for all symbols.
         
-        With incremental=True, only calculates metrics for new dates not already processed.
+        With incremental=True, preserves existing non-null values and only fills
+        missing dates/cells from freshly computed metrics.
         
         Returns a dictionary mapping symbol -> DataFrame with date-indexed metrics.
         """
@@ -162,7 +163,7 @@ class MetricsProcessor:
         
         print(f"\nProcessing {len(symbols)} symbols with rolling metrics...")
         if incremental:
-            print(f"[OK] Incremental mode: Will skip already-calculated metrics")
+            print(f"[OK] Incremental mode: Will preserve existing values and fill missing dates/cells")
         
         for i, symbol in enumerate(symbols):
             if (i + 1) % 50 == 0:
@@ -172,24 +173,10 @@ class MetricsProcessor:
             existing_metrics = None
             if incremental:
                 existing_metrics = self.get_existing_metrics(symbol, run_dir)
-            
-            # Determine what date range needs processing
-            process_start_date = start_date
-            if existing_metrics is not None and len(existing_metrics) > 0:
-                existing_max_date = existing_metrics.index.max()
-                
-                # If existing metrics cover the full requested range, skip
-                if existing_max_date >= end_date:
-                    metrics_data[symbol] = existing_metrics
-                    skipped_count += 1
-                    continue
-                
-                # Only process dates after existing metrics
-                process_start_date = existing_max_date + timedelta(days=1)
-                print(f"  [Incremental] {symbol}: Existing metrics up to {existing_max_date.date()}, processing from {process_start_date.date()}")
-            
-            # Load and process data
-            df = self.load_symbol_data(symbol, process_start_date, end_date)
+
+            # Always load full requested range so rolling windows remain correct
+            # and incremental mode can backfill internal gaps.
+            df = self.load_symbol_data(symbol, start_date, end_date)
             if df is None or len(df) < 1:
                 # No new data, use existing if available
                 if existing_metrics is not None:
@@ -202,23 +189,30 @@ class MetricsProcessor:
             
             try:
                 # Calculate all rolling metrics using the metrics engine
-                # Need full history for rolling windows, so reload from beginning
                 if existing_metrics is not None:
-                    # Need to reload full data for proper rolling calculations
-                    df_full = self.load_symbol_data(symbol, start_date, end_date)
-                    if df_full is not None and len(df_full) >= min_days * 0.5:
-                        metrics_df = self.metrics_engine.calculate_all(df_full)
-                        
+                    if len(df) >= min_days * 0.5:
+                        metrics_df = self.metrics_engine.calculate_all(df)
+
                         if metrics_df is not None and len(metrics_df) > 0:
-                            # Only keep new metrics that weren't in existing data
-                            new_metrics = metrics_df[metrics_df.index > existing_max_date]
-                            if len(new_metrics) > 0:
-                                # Merge with existing
-                                metrics_data[symbol] = pd.concat([existing_metrics, new_metrics])
+                            # Keep existing non-null values, fill only blanks/missing dates.
+                            merged_metrics = existing_metrics.combine_first(metrics_df)
+
+                            # Treat as updated if we added rows/columns or reduced NaNs.
+                            rows_added = len(merged_metrics.index.difference(existing_metrics.index))
+                            cols_added = len(merged_metrics.columns.difference(existing_metrics.columns))
+                            nans_before = int(existing_metrics.isna().sum().sum())
+                            nans_after = int(merged_metrics.reindex(columns=existing_metrics.columns).isna().sum().sum())
+                            filled_cells = max(0, nans_before - nans_after)
+
+                            if rows_added > 0 or cols_added > 0 or filled_cells > 0:
+                                metrics_data[symbol] = merged_metrics
                                 loaded_count += 1
                             else:
                                 metrics_data[symbol] = existing_metrics
                                 skipped_count += 1
+                        else:
+                            metrics_data[symbol] = existing_metrics
+                            skipped_count += 1
                 else:
                     # No existing metrics, process normally
                     if len(df) < min_days * 0.5:
@@ -404,8 +398,9 @@ def main():
         end_date = datetime.strptime(args.end_date, "%Y-%m-%d") if args.end_date else discovered_max
         start_date = datetime.strptime(args.start_date, "%Y-%m-%d") if args.start_date else (discovered_max - timedelta(days=365*10))
         
-        # Ensure start date doesn't go before available data
-        if start_date < discovered_min:
+        # If start date was auto-selected, keep it within discovered range.
+        # When user explicitly provides --start-date, honor it to allow full-history runs.
+        if args.start_date is None and start_date < discovered_min:
             start_date = discovered_min
             print(f"[OK] Adjusted start date to earliest available: {start_date.date()}")
         
