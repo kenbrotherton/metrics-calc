@@ -1,0 +1,13 @@
+{
+  "environment": "backtesting",
+  "data-folder": "/Lean/Data",
+  "results-destination-folder": "/Lean/Results",
+  "cache-location": "/Lean/Cache",
+  "python-venv": 1,
+  "algorithm-language": "Python",
+  "algorithm-location": "main.py",
+  "algorithm-type-name": "PairedSwitching",
+  "job-handler-dt": "QuantConnect.Lean.Engine.Setup.BacktestingSetupHandler",
+  "debugging": false,
+  "log-handler": "QuantConnect.Logging.CompositeLogHandler"
+}

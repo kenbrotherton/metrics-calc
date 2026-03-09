@@ -1,6 +1,3 @@
-# region imports
-from AlgorithmImports import *
-# endregion
 """
 Modular Metrics Calculator for Rolling Time-Series Metrics
 

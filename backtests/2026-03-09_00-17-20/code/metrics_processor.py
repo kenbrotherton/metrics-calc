@@ -275,7 +275,6 @@ class MetricsProcessor:
 def main():
     """Main entry point for script execution."""
     parser = argparse.ArgumentParser(description="Process historical data and calculate rolling metrics")
-    parser.add_argument("--data-root", default=r"C:\Users\kenbr\QC\data", help="Root directory for market data")
     parser.add_argument("--output-dir", default="processed_metrics", help="Output directory for metrics")
     parser.add_argument("--symbols-limit", type=int, default=None, help="Limit number of symbols to process")
     parser.add_argument("--start-date", default=None, help="Start date (YYYY-MM-DD)")
@@ -285,7 +284,7 @@ def main():
     
     try:
         # Initialize processor
-        processor = MetricsProcessor(data_root=args.data_root, output_dir=args.output_dir)
+        processor = MetricsProcessor(output_dir=args.output_dir)
         
         # Get available symbols
         symbols = processor.get_available_symbols(limit=args.symbols_limit)

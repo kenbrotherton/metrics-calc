@@ -1,0 +1,6 @@
+Launching analysis for 1574534604 with LEAN Engine v2.5.0.0
+2023-02-18 00:00:00 Algorithm starting warm up...
+2025-03-17 16:00:00 Algorithm finished warming up.
+2025-03-20 16:00:00 Warning: all market orders sent using daily data, or market orders sent after hours are automatically converted into MarketOnOpen orders.
+Algorithm Stopped
+Algorithm Id:(1574534604) completed in 141.14 seconds at 4k data points per second. Processing total of 536,095 data points.

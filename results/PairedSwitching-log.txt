@@ -1,0 +1,4 @@
+Launching analysis for PairedSwitching with LEAN Engine v2.5.0.0
+2023-02-18 00:00:00 Algorithm starting warm up...
+2025-03-17 16:00:00 Algorithm finished warming up.
+Algorithm Id:(PairedSwitching) completed in 8.70 seconds at 7k data points per second. Processing total of 59,032 data points.

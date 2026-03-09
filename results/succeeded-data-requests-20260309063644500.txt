@@ -1,0 +1,12 @@
+/equity/usa/daily/spy.zip
+/equity/usa/daily/meta.zip
+/equity/usa/daily/tsla.zip
+/equity/usa/daily/unh.zip
+/equity/usa/daily/jpm.zip
+/equity/usa/daily/amzn.zip
+/equity/usa/daily/xom.zip
+/equity/usa/daily/aapl.zip
+/equity/usa/daily/msft.zip
+/equity/usa/daily/nvda.zip
+/equity/usa/hour/spy.zip
+/alternative/interest-rate/usa/interest-rate.csv

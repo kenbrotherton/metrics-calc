@@ -1,0 +1,17 @@
+{
+  "environment": "backtesting",
+  "data-folder": "/Lean/Data",
+  "results-destination-folder": "/Lean/Results",
+  "debugging": true,
+  "algorithm-type-name": "PairedSwitching",
+  "algorithm-language": "Python",
+  "algorithm-location": "/Lean/Strategies/main.py",
+  "parameters": {
+    "local_data_mode": "true",
+    "local_symbols": "SPY,AAPL,MSFT,AMZN,NVDA,META,TSLA,JPM,XOM,UNH",
+    "include_agg": "false",
+    "cluster_k_max": "12",
+    "pair_corr_threshold": "-0.7",
+    "event_group_trigger_pct": "0.30"
+  }
+}
