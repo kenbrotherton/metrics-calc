@@ -10,9 +10,13 @@ __pycache__/
 
 # IDE
 .vscode/
+.QuantConnect/
 
 # Workspace
 qc.code-workspace
+
+# Lock files
+*.lock
 
 # Data directories
 data_old/
