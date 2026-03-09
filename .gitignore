@@ -11,6 +11,9 @@ __pycache__/
 # IDE
 .vscode/
 
+# Workspace
+qc.code-workspace
+
 # Data directories
 data_old/
 processed_data/
